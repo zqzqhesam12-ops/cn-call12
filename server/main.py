@@ -1418,12 +1418,12 @@ def init_db():
             caller_id TEXT NOT NULL,
             target_id TEXT NOT NULL,
             caller_name TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            expires_at INTEGER NOT NULL,
+            created_at BIGINT NOT NULL,
+            expires_at BIGINT NOT NULL,
             status TEXT NOT NULL,
             video_state INTEGER NOT NULL DEFAULT 0,
-            negotiation_expires_at INTEGER,
-            connection_expires_at INTEGER,
+            negotiation_expires_at BIGINT,
+            connection_expires_at BIGINT,
             media_ready_users TEXT NOT NULL DEFAULT '[]',
             delivery_confirmed_at BIGINT,
             delivery_deadline_at BIGINT,
@@ -1452,10 +1452,10 @@ def init_db():
             source_user_id TEXT NOT NULL,
             target_user_id TEXT NOT NULL,
             event_type TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            acknowledged_at INTEGER,
+            created_at BIGINT NOT NULL,
+            acknowledged_at BIGINT,
             state_version INTEGER NOT NULL DEFAULT 1,
-            last_attempt_at INTEGER,
+            last_attempt_at BIGINT,
             attempt_count INTEGER NOT NULL DEFAULT 0
         )
         """
@@ -1481,8 +1481,8 @@ def init_db():
     if db.is_postgres:
         for statement in (
             "ALTER TABLE call_records ADD COLUMN IF NOT EXISTS video_state INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE call_records ADD COLUMN IF NOT EXISTS negotiation_expires_at INTEGER",
-            "ALTER TABLE call_records ADD COLUMN IF NOT EXISTS connection_expires_at INTEGER",
+            "ALTER TABLE call_records ADD COLUMN IF NOT EXISTS negotiation_expires_at BIGINT",
+            "ALTER TABLE call_records ADD COLUMN IF NOT EXISTS connection_expires_at BIGINT",
             "ALTER TABLE call_records ADD COLUMN IF NOT EXISTS state_version INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE call_records ADD COLUMN IF NOT EXISTS media_ready_users TEXT NOT NULL DEFAULT '[]'",
             "ALTER TABLE call_records ADD COLUMN IF NOT EXISTS delivery_confirmed_at BIGINT",
@@ -1490,7 +1490,14 @@ def init_db():
             "ALTER TABLE call_records ADD COLUMN IF NOT EXISTS reachability_proven_at BIGINT",
             "ALTER TABLE call_records ALTER COLUMN delivery_confirmed_at TYPE BIGINT",
             "ALTER TABLE call_records ALTER COLUMN delivery_deadline_at TYPE BIGINT",
-            "ALTER TABLE durable_terminal_events ADD COLUMN IF NOT EXISTS last_attempt_at INTEGER",
+            "ALTER TABLE call_records ALTER COLUMN created_at TYPE BIGINT",
+            "ALTER TABLE call_records ALTER COLUMN expires_at TYPE BIGINT",
+            "ALTER TABLE call_records ALTER COLUMN negotiation_expires_at TYPE BIGINT",
+            "ALTER TABLE call_records ALTER COLUMN connection_expires_at TYPE BIGINT",
+            "ALTER TABLE durable_terminal_events ALTER COLUMN created_at TYPE BIGINT",
+            "ALTER TABLE durable_terminal_events ALTER COLUMN acknowledged_at TYPE BIGINT",
+            "ALTER TABLE durable_terminal_events ALTER COLUMN last_attempt_at TYPE BIGINT",
+            "ALTER TABLE durable_terminal_events ADD COLUMN IF NOT EXISTS last_attempt_at BIGINT",
             "ALTER TABLE durable_terminal_events ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0",
         ):
             db.execute(statement)
