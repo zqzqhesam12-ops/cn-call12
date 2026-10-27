@@ -1,6 +1,6 @@
 class ServerConfig {
   static const String host =
-      'cn-call11-production-79ea.up.railway.app';
+      'cn-call.hostless.app';
 
   static String get httpUrl {
     return 'https://$host';
