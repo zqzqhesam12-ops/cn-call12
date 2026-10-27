@@ -1494,11 +1494,11 @@ def init_db():
             "ALTER TABLE call_records ALTER COLUMN expires_at TYPE BIGINT",
             "ALTER TABLE call_records ALTER COLUMN negotiation_expires_at TYPE BIGINT",
             "ALTER TABLE call_records ALTER COLUMN connection_expires_at TYPE BIGINT",
+            "ALTER TABLE durable_terminal_events ADD COLUMN IF NOT EXISTS last_attempt_at BIGINT",
+            "ALTER TABLE durable_terminal_events ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE durable_terminal_events ALTER COLUMN created_at TYPE BIGINT",
             "ALTER TABLE durable_terminal_events ALTER COLUMN acknowledged_at TYPE BIGINT",
             "ALTER TABLE durable_terminal_events ALTER COLUMN last_attempt_at TYPE BIGINT",
-            "ALTER TABLE durable_terminal_events ADD COLUMN IF NOT EXISTS last_attempt_at BIGINT",
-            "ALTER TABLE durable_terminal_events ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0",
         ):
             db.execute(statement)
     else:
