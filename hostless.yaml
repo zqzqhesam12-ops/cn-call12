@@ -1,0 +1,10 @@
+build:
+  system: docker
+
+dockerfile_path: server/Dockerfile
+working_directory: /
+build_context_directory: /
+
+health_check:
+  type: tcp
+  interval_in_seconds: 10
