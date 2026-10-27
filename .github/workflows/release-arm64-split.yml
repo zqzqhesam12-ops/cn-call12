@@ -1,0 +1,80 @@
+name: Android ARM64 Split Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "mobile/**"
+      - ".github/workflows/release-arm64-split.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-arm64-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-arm64-v8a:
+    name: Build arm64-v8a release ZIP
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.47.5"
+          cache: true
+
+      - name: Show build tool versions
+        run: |
+          flutter --version
+          java -version
+
+      - name: Resolve Flutter dependencies
+        working-directory: mobile
+        run: flutter pub get
+
+      - name: Build split APK for arm64-v8a
+        working-directory: mobile
+        run: flutter build apk --release --target-platform android-arm64 --split-per-abi
+
+      - name: Verify APK and package ZIP
+        working-directory: mobile
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="build/app/outputs/flutter-apk/app-arm64-v8a-release.apk"
+          test -s "$APK"
+          mkdir -p dist
+          cp "$APK" dist/cn-call12-arm64-v8a-release.apk
+          (
+            cd dist
+            sha256sum cn-call12-arm64-v8a-release.apk > SHA256SUMS.txt
+            printf 'Repository: %s\nCommit: %s\nArchitecture: arm64-v8a\nBuild: Flutter release split APK\n' \
+              "$GITHUB_REPOSITORY" "$GITHUB_SHA" > BUILD_INFO.txt
+            zip -q cn-call12-arm64-v8a-release.zip \
+              cn-call12-arm64-v8a-release.apk SHA256SUMS.txt BUILD_INFO.txt
+            unzip -l cn-call12-arm64-v8a-release.zip
+            unzip -t cn-call12-arm64-v8a-release.zip
+          )
+
+      - name: Upload arm64-v8a split ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: cn-call12-arm64-v8a-release-zip
+          path: mobile/dist/cn-call12-arm64-v8a-release.zip
+          if-no-files-found: error
+          retention-days: 14
