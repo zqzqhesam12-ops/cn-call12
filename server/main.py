@@ -1424,6 +1424,16 @@ def init_db():
         """
     )
 
+    # Protect a phone number throughout the decision transaction as well as
+    # while it is waiting; keep the older index for existing deployments.
+    db.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_registration_requests_active_phone
+        ON registration_requests (user_id)
+        WHERE status IN ('pending', 'processing')
+        """
+    )
+
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS fcm_tokens (
@@ -2208,7 +2218,7 @@ async def request_phone_registration(request: PhoneRegistrationRequest):
         pending = db.execute(
             """
             SELECT request_id FROM registration_requests
-            WHERE user_id = ? AND status = 'pending'
+            WHERE user_id = ? AND status IN ('pending', 'processing')
             """,
             (user_id,),
         ).fetchone()
@@ -2401,8 +2411,9 @@ async def decide_registration_request(
                 )
                 db.commit()
                 return {
-                    "success": False,
-                    "message": "تعذر القبول؛ الرقم مرتبط بحساب موجود وتم إغلاق الطلب",
+                    "success": True,
+                    "message": "أُغلق الطلب؛ لا يمكن قبول الرقم لأنه مرتبط بحساب موجود",
+                    "status": "rejected",
                 }
 
             db.execute(
