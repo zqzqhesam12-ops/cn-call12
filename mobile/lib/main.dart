@@ -602,7 +602,12 @@ class _HomeScreenState extends State<HomeScreen> {
   final List<Map<String, dynamic>> _callHistory = [];
 
   bool _loadingData = true;
-
+  Timer? _registrationPollTimer;
+  bool _registrationFetchInProgress = false;
+  bool _registrationDialogOpen = false;
+  bool _registrationDecisionBusy = false;
+  final Set<String> _notifiedRegistrationRequestIds = <String>{};
+  List<Map<String, dynamic>> _pendingRegistrationRequests = [];
 
   @override
   void initState() {
@@ -610,6 +615,14 @@ class _HomeScreenState extends State<HomeScreen> {
 
     _loadLocalData();
     _loadMissedCalls();
+
+    if (CallSession.instance.isDeveloper) {
+      unawaited(_refreshRegistrationRequests(showAlert: true));
+      _registrationPollTimer = Timer.periodic(
+        const Duration(seconds: 10),
+        (_) => _refreshRegistrationRequests(showAlert: true),
+      );
+    }
 
     final rtcManager = RtcCallManager.instance;
     rtcManager.startListening();
@@ -620,6 +633,141 @@ class _HomeScreenState extends State<HomeScreen> {
 
   }
 
+
+  Future<void> _refreshRegistrationRequests({
+    bool showAlert = false,
+    bool forceAlert = false,
+  }) async {
+    if (!CallSession.instance.isDeveloper || _registrationFetchInProgress) return;
+    _registrationFetchInProgress = true;
+    try {
+      final requests = await AccountApi.pendingRegistrationRequests();
+      if (!mounted) return;
+      setState(() {
+        _pendingRegistrationRequests = requests;
+      });
+
+      if (!showAlert || _registrationDialogOpen) return;
+      Map<String, dynamic>? nextRequest;
+      for (final request in requests) {
+        final id = request['request_id']?.toString() ?? '';
+        if (id.isEmpty) continue;
+        if (forceAlert || !_notifiedRegistrationRequestIds.contains(id)) {
+          nextRequest = request;
+          _notifiedRegistrationRequestIds.add(id);
+          break;
+        }
+      }
+
+      if (nextRequest != null) {
+        unawaited(_showRegistrationRequestDialog(nextRequest));
+      } else if (forceAlert && requests.isEmpty) {
+        _message('لا توجد طلبات تسجيل جديدة قيد المراجعة');
+      }
+    } finally {
+      _registrationFetchInProgress = false;
+    }
+  }
+
+  Future<void> _showRegistrationRequestDialog(
+    Map<String, dynamic> request,
+  ) async {
+    if (!mounted || _registrationDialogOpen) return;
+    _registrationDialogOpen = true;
+    final requestId = request['request_id']?.toString() ?? '';
+    final userId = request['user_id']?.toString() ?? '';
+    final username = request['username']?.toString() ?? 'بدون اسم';
+    final requestedAt = int.tryParse(request['requested_at']?.toString() ?? '');
+    final requestedTime = requestedAt == null
+        ? ''
+        : DateTime.fromMillisecondsSinceEpoch(requestedAt).toLocal().toString().substring(0, 16);
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF151515),
+          title: const Row(
+            children: [
+              Icon(Icons.verified_user_outlined, color: Color(0xFF00E676)),
+              SizedBox(width: 10),
+              Expanded(child: Text('طلب تسجيل برقم حقيقي')),
+            ],
+          ),
+          content: Directionality(
+            textDirection: TextDirection.rtl,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text('اسم المستخدم: $username'),
+                const SizedBox(height: 8),
+                SelectableText('رقم الهاتف: $userId'),
+                if (requestedTime.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text('وقت الطلب: $requestedTime', style: TextStyle(color: Colors.grey.shade500, fontSize: 12)),
+                ],
+                const SizedBox(height: 12),
+                const Text('لا يُنشأ الحساب إلا بعد قبولك للطلب.'),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: _registrationDecisionBusy
+                  ? null
+                  : () => _decideRegistrationRequest(requestId, false),
+              child: const Text('رفض', style: TextStyle(color: Colors.redAccent)),
+            ),
+            FilledButton.icon(
+              onPressed: _registrationDecisionBusy
+                  ? null
+                  : () => _decideRegistrationRequest(requestId, true),
+              style: FilledButton.styleFrom(backgroundColor: const Color(0xFF00A85A)),
+              icon: const Icon(Icons.check),
+              label: const Text('قبول الرقم'),
+            ),
+          ],
+        );
+      },
+    );
+
+    _registrationDialogOpen = false;
+    if (mounted) unawaited(_refreshRegistrationRequests(showAlert: true));
+  }
+
+  Future<void> _decideRegistrationRequest(
+    String requestId,
+    bool approve,
+  ) async {
+    if (requestId.isEmpty || _registrationDecisionBusy) return;
+    setState(() => _registrationDecisionBusy = true);
+    final result = await AccountApi.decideRegistrationRequest(
+      requestId: requestId,
+      approve: approve,
+    );
+    if (!mounted) return;
+    setState(() => _registrationDecisionBusy = false);
+    if (result['success'] == true) {
+      Navigator.of(context, rootNavigator: true).pop();
+      _message(
+        result['message']?.toString() ?? (approve ? 'تم قبول الطلب' : 'تم رفض الطلب'),
+        success: true,
+      );
+    } else {
+      _message(result['message']?.toString() ?? 'تعذر حفظ قرار الإدارة');
+    }
+  }
+
+  void _message(String text, {bool success = false}) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(text),
+        backgroundColor: success ? const Color(0xFF00A85A) : Colors.red.shade800,
+      ),
+    );
+  }
 
   Future<void> _loadLocalData() async {
     final prefs = await SharedPreferences.getInstance();
@@ -752,6 +900,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    _registrationPollTimer?.cancel();
     callIdController.dispose();
     super.dispose();
   }
@@ -915,6 +1064,42 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
 
                       const SizedBox(height: 20),
+                      if (CallSession.instance.isDeveloper)
+                        Container(
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF151515),
+                            borderRadius: BorderRadius.circular(18),
+                            border: Border.all(color: const Color(0xFF00E676).withValues(alpha: .30)),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.fact_check_outlined, color: Color(0xFF00E676), size: 28),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Text('طلبات التسجيل', style: TextStyle(fontWeight: FontWeight.w700)),
+                                    const SizedBox(height: 3),
+                                    Text(
+                                      '\${_pendingRegistrationRequests.length} طلب قيد المراجعة',
+                                      style: TextStyle(color: Colors.grey.shade500, fontSize: 12),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              IconButton(
+                                tooltip: 'مراجعة طلبات التسجيل',
+                                onPressed: () => _refreshRegistrationRequests(
+                                  showAlert: true,
+                                  forceAlert: true,
+                                ),
+                                icon: const Icon(Icons.arrow_forward_ios, color: Color(0xFF00E676)),
+                              ),
+                            ],
+                          ),
+                        ),
                     ],
                   ),
                 ),
@@ -936,19 +1121,66 @@ class RegisterScreen extends StatefulWidget {
 }
 
 class _RegisterScreenState extends State<RegisterScreen> {
-  final userIdController = TextEditingController();
+  static const _pendingIdKey = 'cn_call_registration_request_id';
+  static const _pendingTokenKey = 'cn_call_registration_request_token';
+  static const _pendingPhoneKey = 'cn_call_registration_request_phone';
+  static const _pendingNameKey = 'cn_call_registration_request_name';
 
+  final userIdController = TextEditingController();
   final usernameController = TextEditingController();
   final passwordController = TextEditingController();
   final confirmPasswordController = TextEditingController();
 
   bool hidePassword = true;
   bool hideConfirmPassword = true;
+  bool _useRealPhone = false;
+  bool _submitting = false;
+  bool _pollInProgress = false;
+  bool _approvalGranted = false;
+  Timer? _requestPollTimer;
+  String? _pendingRequestId;
+  String? _pendingRequestToken;
+  String? _statusBanner;
+
+  @override
+  void initState() {
+    super.initState();
+    _restorePendingRequest();
+  }
+
+  Future<void> _restorePendingRequest() async {
+    final prefs = await SharedPreferences.getInstance();
+    final requestId = prefs.getString(_pendingIdKey);
+    final requestToken = prefs.getString(_pendingTokenKey);
+    if (requestId == null || requestId.isEmpty ||
+        requestToken == null || requestToken.isEmpty) {
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _pendingRequestId = requestId;
+      _pendingRequestToken = requestToken;
+      _useRealPhone = true;
+      userIdController.text = prefs.getString(_pendingPhoneKey) ?? '';
+      usernameController.text = prefs.getString(_pendingNameKey) ?? '';
+      _statusBanner = 'لديك طلب رقم حقيقي قيد المتابعة. سنعرض قرار الإدارة هنا.';
+    });
+    _startRequestPolling();
+  }
+
+  void _startRequestPolling() {
+    _requestPollTimer?.cancel();
+    _requestPollTimer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => _pollRegistrationStatus(),
+    );
+    unawaited(_pollRegistrationStatus());
+  }
 
   @override
   void dispose() {
+    _requestPollTimer?.cancel();
     userIdController.dispose();
-
     usernameController.dispose();
     passwordController.dispose();
     confirmPasswordController.dispose();
@@ -956,21 +1188,29 @@ class _RegisterScreenState extends State<RegisterScreen> {
   }
 
   Future<void> createAccount() async {
+    if (_submitting) return;
+    if (_pendingRequestId != null) {
+      await _pollRegistrationStatus();
+      return;
+    }
+    if (_approvalGranted) {
+      await _continueAfterApproval();
+      return;
+    }
+
     final userId = userIdController.text.trim();
     final username = usernameController.text.trim();
     final password = passwordController.text;
     final confirmPassword = confirmPasswordController.text;
 
-    if (userId.isEmpty ||
-        username.isEmpty ||
-        password.isEmpty ||
-        confirmPassword.isEmpty) {
-      _message('أكمل جميع البيانات');
+    if (username.isEmpty || password.isEmpty || confirmPassword.isEmpty ||
+        (_useRealPhone && userId.isEmpty)) {
+      _message('أكمل جميع البيانات المطلوبة');
       return;
     }
 
-    if (int.tryParse(userId) == null) {
-      _message('ID المستخدم يجب أن يكون أرقامًا فقط');
+    if (_useRealPhone && !RegExp(r'^\d{9,15}$').hasMatch(userId)) {
+      _message('أدخل رقم الهاتف بالأرقام فقط، من 9 إلى 15 رقمًا');
       return;
     }
 
@@ -989,54 +1229,187 @@ class _RegisterScreenState extends State<RegisterScreen> {
       return;
     }
 
-    final result = await AccountApi.register(
-      userId: userId,
-      username: username,
-      password: password,
-    );
+    setState(() {
+      _submitting = true;
+      _statusBanner = null;
+    });
 
-    if (!mounted) return;
-
-    final success = result['success'] == true;
-
-    if (!success) {
-      _message(
-        result['message']?.toString() ?? 'تعذر إنشاء الحساب',
+    if (_useRealPhone) {
+      final result = await AccountApi.requestPhoneRegistration(
+        userId: userId,
+        username: username,
+        password: password,
       );
+      if (!mounted) return;
+      if (result['success'] != true) {
+        setState(() => _submitting = false);
+        _message(result['message']?.toString() ?? 'تعذر إرسال طلب الموافقة');
+        return;
+      }
+
+      final requestId = result['request_id']?.toString() ?? '';
+      final requestToken = result['request_token']?.toString() ?? '';
+      if (requestId.isEmpty || requestToken.isEmpty) {
+        setState(() => _submitting = false);
+        _message('وصل رد غير مكتمل من الخادم. حاول مرة أخرى.');
+        return;
+      }
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_pendingIdKey, requestId);
+      await prefs.setString(_pendingTokenKey, requestToken);
+      await prefs.setString(_pendingPhoneKey, userId);
+      await prefs.setString(_pendingNameKey, username);
+
+      setState(() {
+        _submitting = false;
+        _pendingRequestId = requestId;
+        _pendingRequestToken = requestToken;
+        _statusBanner = 'تم إرسال طلب الرقم $userId إلى الإدارة. انتظر القبول أو الرفض داخل التطبيق.';
+      });
+      _startRequestPolling();
       return;
     }
 
+    final result = await AccountApi.registerUnique(
+      username: username,
+      password: password,
+    );
+    if (!mounted) return;
+    if (result['success'] != true) {
+      setState(() => _submitting = false);
+      _message(result['message']?.toString() ?? 'تعذر إنشاء الحساب');
+      return;
+    }
+
+    final allocatedId = result['user_id']?.toString() ?? '';
+    if (!RegExp(r'^79\d{7}$').hasMatch(allocatedId)) {
+      setState(() => _submitting = false);
+      _message('أنشأ الخادم حسابًا لكن الرقم المستلم غير صالح. تواصل مع الإدارة.');
+      return;
+    }
+
+    await _completeLogin(
+      userId: allocatedId,
+      password: password,
+      fallbackName: username,
+      successMessage: 'تم إنشاء الحساب. رقمك الفريد: $allocatedId',
+    );
+  }
+
+  Future<void> _pollRegistrationStatus() async {
+    if (_pollInProgress || _pendingRequestId == null ||
+        _pendingRequestToken == null) {
+      return;
+    }
+    _pollInProgress = true;
+    try {
+      final result = await AccountApi.registrationRequestStatus(
+        requestId: _pendingRequestId!,
+        requestToken: _pendingRequestToken!,
+      );
+      if (!mounted || result['success'] != true) return;
+
+      final status = result['status']?.toString() ?? 'pending';
+      if (status == 'pending' || status == 'processing') {
+        if (_statusBanner == null ||
+            !_statusBanner!.contains('قيد المراجعة')) {
+          setState(() {
+            _statusBanner = 'طلبك قيد المراجعة من إدارة CN CALL. لا حاجة لإعادة التسجيل.';
+          });
+        }
+        return;
+      }
+
+      _requestPollTimer?.cancel();
+      _requestPollTimer = null;
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_pendingIdKey);
+      await prefs.remove(_pendingTokenKey);
+      await prefs.remove(_pendingPhoneKey);
+      await prefs.remove(_pendingNameKey);
+
+      if (status == 'approved') {
+        final approvedId = result['user_id']?.toString() ?? userIdController.text.trim();
+        setState(() {
+          _pendingRequestId = null;
+          _pendingRequestToken = null;
+          _approvalGranted = true;
+          _statusBanner = 'وافقت الإدارة على الرقم $approvedId. أدخل كلمة المرور لإكمال تسجيل الدخول.';
+          userIdController.text = approvedId;
+          _useRealPhone = true;
+        });
+        if (passwordController.text.isNotEmpty) {
+          await _continueAfterApproval();
+        }
+      } else if (status == 'rejected') {
+        setState(() {
+          _pendingRequestId = null;
+          _pendingRequestToken = null;
+          _approvalGranted = false;
+          _statusBanner = result['message']?.toString() ?? 'تم رفض طلب الرقم من الإدارة.';
+        });
+        _message(_statusBanner!);
+      }
+    } finally {
+      _pollInProgress = false;
+    }
+  }
+
+  Future<void> _continueAfterApproval() async {
+    final userId = userIdController.text.trim();
+    final password = passwordController.text;
+    final username = usernameController.text.trim();
+    if (userId.isEmpty || password.isEmpty) {
+      _message('تمت الموافقة. أدخل رقم الهاتف وكلمة المرور لإكمال الدخول.');
+      return;
+    }
+    setState(() => _submitting = true);
+    await _completeLogin(
+      userId: userId,
+      password: password,
+      fallbackName: username,
+      successMessage: 'تم قبول رقم الهاتف وتسجيل الدخول بنجاح',
+    );
+  }
+
+  Future<void> _completeLogin({
+    required String userId,
+    required String password,
+    required String fallbackName,
+    required String successMessage,
+  }) async {
     final loginResult = await AccountApi.login(
       userId: userId,
       password: password,
     );
-
     if (!mounted) return;
 
-    final loginSuccess = loginResult['success'] == true;
-    if (!loginSuccess) {
+    if (loginResult['success'] != true) {
+      setState(() => _submitting = false);
       _message(
-        loginResult['message']?.toString() ?? 'تم إنشاء الحساب، ولكن تعذر تسجيل الدخول التلقائي',
+        loginResult['message']?.toString() ??
+            'تم تجهيز الحساب، لكن تعذر تسجيل الدخول. استخدم الرقم وكلمة المرور.',
       );
       return;
     }
 
     final user = loginResult['user'];
     if (user is! Map) {
+      setState(() => _submitting = false);
       _message('بيانات المستخدم غير صالحة');
       return;
     }
 
     final loggedUserId = user['user_id']?.toString();
-    final loggedUsername = user['username']?.toString() ?? username;
+    final loggedUsername = user['username']?.toString() ?? fallbackName;
     final accessToken = loginResult['access_token']?.toString();
     final isDeveloper = user['is_developer'] == true;
     final developerBadge = user['developer_badge']?.toString().trim();
 
-    if (loggedUserId == null ||
-        loggedUserId.isEmpty ||
-        accessToken == null ||
-        accessToken.isEmpty) {
+    if (loggedUserId == null || loggedUserId.isEmpty ||
+        accessToken == null || accessToken.isEmpty) {
+      setState(() => _submitting = false);
       _message('بيانات الجلسة ناقصة');
       return;
     }
@@ -1048,13 +1421,12 @@ class _RegisterScreenState extends State<RegisterScreen> {
       isDeveloper: isDeveloper,
       developerBadge: developerBadge,
     );
-
     await FirebaseMessagingService.instance.refreshTokenForCurrentUser();
-
     if (!mounted) return;
 
-    _message('تم إنشاء الحساب وتسجيل الدخول بنجاح', success: true);
-
+    _requestPollTimer?.cancel();
+    _requestPollTimer = null;
+    _message(successMessage, success: true);
     Navigator.pushAndRemoveUntil(
       context,
       MaterialPageRoute(builder: (_) => const HomeScreen()),
@@ -1075,6 +1447,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final pending = _pendingRequestId != null;
     return Directionality(
       textDirection: TextDirection.rtl,
       child: Scaffold(
@@ -1096,48 +1469,76 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 child: Column(
                   children: [
                     _Logo(),
-
                     const SizedBox(height: 22),
-
                     const Text(
                       'إنشاء حساب',
-                      style: TextStyle(
-                        fontSize: 30,
-                        fontWeight: FontWeight.w800,
-                      ),
+                      style: TextStyle(fontSize: 30, fontWeight: FontWeight.w800),
                     ),
-
                     const SizedBox(height: 8),
-
                     Text(
-                      'أنشئ حسابك في CN CALL',
-                      style: TextStyle(
-                        color: Colors.grey.shade500,
-                        fontSize: 14,
+                      'اختر طريقة الحصول على رقم CN CALL',
+                      style: TextStyle(color: Colors.grey.shade500, fontSize: 14),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 24),
+                    Container(
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF151515),
+                        borderRadius: BorderRadius.circular(18),
+                        border: Border.all(color: Colors.grey.shade800),
+                      ),
+                      child: Column(
+                        children: [
+                          RadioListTile<bool>(
+                            value: false,
+                            groupValue: _useRealPhone,
+                            onChanged: (value) {
+                              if (value == null || pending || _approvalGranted) return;
+                              setState(() {
+                                _useRealPhone = value;
+                                _statusBanner = null;
+                              });
+                            },
+                            activeColor: const Color(0xFF00E676),
+                            title: const Text('رقم فريد من CN CALL'),
+                            subtitle: const Text('رقم عشوائي من 9 أرقام يبدأ بـ 79'),
+                          ),
+                          Divider(color: Colors.grey.shade800, height: 1),
+                          RadioListTile<bool>(
+                            value: true,
+                            groupValue: _useRealPhone,
+                            onChanged: (value) {
+                              if (value == null || pending || _approvalGranted) return;
+                              setState(() {
+                                _useRealPhone = value;
+                                _statusBanner = null;
+                              });
+                            },
+                            activeColor: const Color(0xFF00E676),
+                            title: const Text('استخدام رقم هاتفي الحقيقي'),
+                            subtitle: const Text('يتطلب موافقة إدارة CN CALL قبل إنشاء الحساب'),
+                          ),
+                        ],
                       ),
                     ),
-
-                    const SizedBox(height: 34),
-
-                    _Field(
-                      controller: userIdController,
-                      label: 'ID المستخدم',
-                      hint: 'الرقم الذي تستخدمه لتسجيل الدخول والتواصل',
-                      icon: Icons.badge_outlined,
-                      keyboardType: TextInputType.number,
-                    ),
-
+                    if (_useRealPhone) ...[
+                      const SizedBox(height: 16),
+                      _Field(
+                        controller: userIdController,
+                        label: 'رقم الهاتف الحقيقي',
+                        hint: 'أدخل رقم هاتفك',
+                        icon: Icons.phone_android_outlined,
+                        keyboardType: TextInputType.phone,
+                      ),
+                    ],
                     const SizedBox(height: 16),
-
                     _Field(
                       controller: usernameController,
                       label: 'اسم المستخدم',
                       hint: 'الاسم الذي سيظهر للآخرين أثناء المكالمة',
                       icon: Icons.person_outline,
                     ),
-
                     const SizedBox(height: 16),
-
                     _Field(
                       controller: passwordController,
                       label: 'كلمة المرور',
@@ -1145,21 +1546,11 @@ class _RegisterScreenState extends State<RegisterScreen> {
                       icon: Icons.lock_outline,
                       obscureText: hidePassword,
                       suffix: IconButton(
-                        onPressed: () {
-                          setState(() {
-                            hidePassword = !hidePassword;
-                          });
-                        },
-                        icon: Icon(
-                          hidePassword
-                              ? Icons.visibility_off
-                              : Icons.visibility,
-                        ),
+                        onPressed: () => setState(() => hidePassword = !hidePassword),
+                        icon: Icon(hidePassword ? Icons.visibility_off : Icons.visibility),
                       ),
                     ),
-
                     const SizedBox(height: 16),
-
                     _Field(
                       controller: confirmPasswordController,
                       label: 'تأكيد كلمة المرور',
@@ -1167,40 +1558,58 @@ class _RegisterScreenState extends State<RegisterScreen> {
                       icon: Icons.lock_reset_outlined,
                       obscureText: hideConfirmPassword,
                       suffix: IconButton(
-                        onPressed: () {
-                          setState(() {
-                            hideConfirmPassword = !hideConfirmPassword;
-                          });
-                        },
-                        icon: Icon(
-                          hideConfirmPassword
-                              ? Icons.visibility_off
-                              : Icons.visibility,
-                        ),
+                        onPressed: () => setState(() => hideConfirmPassword = !hideConfirmPassword),
+                        icon: Icon(hideConfirmPassword ? Icons.visibility_off : Icons.visibility),
                       ),
                     ),
-
+                    if (_statusBanner != null) ...[
+                      const SizedBox(height: 18),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF00E676).withValues(alpha: .08),
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: const Color(0xFF00E676).withValues(alpha: .35)),
+                        ),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Icon(Icons.info_outline, color: Color(0xFF00E676)),
+                            const SizedBox(width: 10),
+                            Expanded(child: Text(_statusBanner!, style: const TextStyle(height: 1.4))),
+                          ],
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 24),
-
                     _PrimaryButton(
-                      text: 'إنشاء الحساب',
-                      onPressed: createAccount,
+                      text: _submitting
+                          ? 'جارٍ التنفيذ...'
+                          : pending
+                              ? 'فحص حالة طلب الموافقة'
+                              : _approvalGranted
+                                  ? 'إكمال تسجيل الدخول'
+                                  : _useRealPhone
+                                      ? 'إرسال طلب الموافقة'
+                                      : 'إنشاء الحساب والحصول على رقم',
+                      onPressed: _submitting
+                          ? () {}
+                          : pending
+                              ? _pollRegistrationStatus
+                              : _approvalGranted
+                                  ? _continueAfterApproval
+                                  : createAccount,
                     ),
-
                     const SizedBox(height: 16),
-
                     TextButton(
                       onPressed: () => Navigator.pop(context),
                       child: const Text(
                         'لدي حساب بالفعل',
-                        style: TextStyle(
-                          color: Color(0xFF00E676),
-                        ),
+                        style: TextStyle(color: Color(0xFF00E676)),
                       ),
                     ),
-
                     const SizedBox(height: 20),
-
                     _Footer(),
                   ],
                 ),
@@ -1212,8 +1621,6 @@ class _RegisterScreenState extends State<RegisterScreen> {
     );
   }
 }
-
-
 
 // ============================================================
 // SHARED UI

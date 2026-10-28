@@ -1393,6 +1393,39 @@ def init_db():
 
     db.execute(
         """
+        CREATE TABLE IF NOT EXISTS registration_requests (
+            request_id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            password_salt TEXT NOT NULL,
+            request_token_hash TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            requested_at BIGINT NOT NULL,
+            reviewed_at BIGINT,
+            reviewed_by TEXT,
+            decision_message TEXT
+        )
+        """
+    )
+
+    db.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_registration_requests_status_time
+        ON registration_requests (status, requested_at)
+        """
+    )
+
+    db.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_registration_requests_pending_phone
+        ON registration_requests (user_id)
+        WHERE status = 'pending'
+        """
+    )
+
+    db.execute(
+        """
         CREATE TABLE IF NOT EXISTS fcm_tokens (
             user_id TEXT PRIMARY KEY,
             token TEXT NOT NULL,
@@ -1828,6 +1861,26 @@ class RegisterRequest(BaseModel):
     password: str
 
 
+class UniqueRegisterRequest(BaseModel):
+    username: str
+    password: str
+
+
+class PhoneRegistrationRequest(BaseModel):
+    user_id: str
+    username: str
+    password: str
+
+
+class RegistrationStatusRequest(BaseModel):
+    request_id: str
+    request_token: str
+
+
+class RegistrationDecisionRequest(BaseModel):
+    approve: bool
+
+
 class LoginRequest(BaseModel):
     user_id: str
     password: str
@@ -2049,93 +2102,367 @@ async def health():
 # REGISTER
 # ============================================================
 
-@app.post("/register")
-async def register(request: RegisterRequest):
+def _registration_validation_error(username: str, password: str) -> str | None:
+    username = str(username).strip()
+    if len(username) < 3:
+        return "اسم المستخدم يجب أن يكون 3 أحرف على الأقل"
+    if _contains_reserved_developer_phrase(username):
+        return "هذا الاسم محجوز لهوية مطوّر CN CALL"
+    if len(password) < 6:
+        return "كلمة المرور يجب أن تكون 6 أحرف على الأقل"
+    return None
+
+
+def _registration_request_to_dict(row) -> dict[str, object]:
+    return {
+        "request_id": str(row["request_id"]),
+        "user_id": str(row["user_id"]),
+        "username": str(row["username"]),
+        "requested_at": int(row["requested_at"]),
+    }
+
+
+@app.post("/register/unique")
+async def register_unique(request: UniqueRegisterRequest):
+    username = request.username.strip()
+    password = request.password
+    validation_error = _registration_validation_error(username, password)
+    if validation_error:
+        return {"success": False, "message": validation_error}
+
+    password_hash, password_salt = hash_password(password)
+    db = get_db()
+    try:
+        # Database-created ID: exactly 9 digits, always starting with 79.
+        # ON CONFLICT keeps rare concurrent collisions from creating duplicates.
+        for _ in range(100):
+            user_id = f"79{secrets.randbelow(10_000_000):07d}"
+            inserted = db.execute(
+                """
+                INSERT INTO users (user_id, username, password_hash, password_salt)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO NOTHING
+                """,
+                (user_id, username, password_hash, password_salt),
+            )
+            if inserted.rowcount == 1:
+                db.commit()
+                is_developer, developer_badge = _developer_profile_for_user(user_id)
+                return {
+                    "success": True,
+                    "message": "تم إنشاء الحساب بنجاح",
+                    "user_id": user_id,
+                    "user": {
+                        "user_id": user_id,
+                        "username": username,
+                        "is_developer": is_developer,
+                        "developer_badge": developer_badge,
+                    },
+                }
+
+        db.rollback()
+        return {
+            "success": False,
+            "message": "تعذر تخصيص رقم فريد الآن، حاول مرة أخرى",
+        }
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@app.post("/register/phone-request")
+async def request_phone_registration(request: PhoneRegistrationRequest):
     user_id = request.user_id.strip()
     username = request.username.strip()
     password = request.password
 
-    if not user_id:
+    if not re.fullmatch(r"\d{9,15}", user_id):
         return {
             "success": False,
-            "message": "ID المستخدم مطلوب",
+            "message": "أدخل رقم هاتف صحيحًا مكوّنًا من 9 إلى 15 رقمًا",
+        }
+    if user_id == CN_CALL_DEVELOPER_ID:
+        return {
+            "success": False,
+            "message": "هذا الرقم محجوز لحساب إدارة CN CALL",
         }
 
-    if not re.fullmatch(r"\d+", user_id):
-        return {
-            "success": False,
-            "message": "ID المستخدم يجب أن يكون أرقامًا فقط",
-        }
-
-    if len(username) < 3:
-        return {
-            "success": False,
-            "message": "اسم المستخدم يجب أن يكون 3 أحرف على الأقل",
-        }
-
-    if (
-        user_id != CN_CALL_DEVELOPER_ID
-        and _contains_reserved_developer_phrase(username)
-    ):
-        return {
-            "success": False,
-            "message": "هذا الاسم محجوز لهوية مطوّر CN CALL",
-        }
-
-    if len(password) < 6:
-        return {
-            "success": False,
-            "message": "كلمة المرور يجب أن تكون 6 أحرف على الأقل",
-        }
+    validation_error = _registration_validation_error(username, password)
+    if validation_error:
+        return {"success": False, "message": validation_error}
 
     db = get_db()
+    try:
+        existing = db.execute(
+            "SELECT user_id FROM users WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        if existing is not None:
+            return {
+                "success": False,
+                "message": "هذا الرقم مرتبط بحساب موجود بالفعل",
+            }
 
-    existing = db.execute(
-        "SELECT user_id FROM users WHERE user_id = ?",
-        (user_id,),
-    ).fetchone()
+        pending = db.execute(
+            """
+            SELECT request_id FROM registration_requests
+            WHERE user_id = ? AND status = 'pending'
+            """,
+            (user_id,),
+        ).fetchone()
+        if pending is not None:
+            return {
+                "success": False,
+                "message": "يوجد طلب قيد المراجعة لهذا الرقم بالفعل",
+            }
 
-    if existing is not None:
+        password_hash, password_salt = hash_password(password)
+        request_id = uuid.uuid4().hex
+        request_token = secrets.token_urlsafe(32)
+        request_token_hash = hashlib.sha256(
+            request_token.encode("utf-8")
+        ).hexdigest()
+        now = int(time.time() * 1000)
+
+        db.execute(
+            """
+            INSERT INTO registration_requests (
+                request_id, user_id, username, password_hash, password_salt,
+                request_token_hash, status, requested_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+            """,
+            (
+                request_id,
+                user_id,
+                username,
+                password_hash,
+                password_salt,
+                request_token_hash,
+                now,
+            ),
+        )
+        db.commit()
+        print(
+            "[CN CALL][REGISTRATION REQUEST]",
+            "request_id=", request_id,
+            "user_id=", user_id,
+            "status=pending",
+        )
+        return {
+            "success": True,
+            "message": "تم إرسال طلب استخدام الرقم إلى الإدارة",
+            "request_id": request_id,
+            "request_token": request_token,
+            "status": "pending",
+        }
+    except Exception:
+        db.rollback()
+        raise
+    finally:
         db.close()
 
-        return {
-            "success": False,
-            "message": "ID المستخدم مستخدم بالفعل",
-        }
 
-    password_hash, password_salt = hash_password(password)
+@app.post("/register/phone-request/status")
+async def phone_registration_status(request: RegistrationStatusRequest):
+    request_id = request.request_id.strip()
+    request_token = request.request_token.strip()
+    if not request_id or not request_token:
+        raise HTTPException(status_code=404, detail="طلب التسجيل غير موجود")
 
-    db.execute(
-        """
-        INSERT INTO users (
-            user_id,
-            username,
-            password_hash,
-            password_salt
-        )
-        VALUES (?, ?, ?, ?)
-        """,
-        (
-            user_id,
-            username,
-            password_hash,
-            password_salt,
-        ),
-    )
+    db = get_db()
+    try:
+        row = db.execute(
+            """
+            SELECT request_token_hash, status, user_id, decision_message
+            FROM registration_requests
+            WHERE request_id = ?
+            """,
+            (request_id,),
+        ).fetchone()
+    finally:
+        db.close()
 
-    db.commit()
-    db.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail="طلب التسجيل غير موجود")
 
-    is_developer, developer_badge = _developer_profile_for_user(user_id)
+    supplied_hash = hashlib.sha256(request_token.encode("utf-8")).hexdigest()
+    if not hmac.compare_digest(str(row["request_token_hash"]), supplied_hash):
+        raise HTTPException(status_code=404, detail="طلب التسجيل غير موجود")
+
+    status = str(row["status"])
+    default_messages = {
+        "pending": "طلبك قيد المراجعة من إدارة CN CALL",
+        "processing": "تتم مراجعة طلبك الآن",
+        "approved": "تم قبول طلبك، جارٍ تسجيل الدخول",
+        "rejected": "تم رفض طلب استخدام هذا الرقم",
+    }
     return {
         "success": True,
-        "message": "تم إنشاء الحساب بنجاح",
-        "user": {
-            "user_id": user_id,
-            "username": username,
-            "is_developer": is_developer,
-            "developer_badge": developer_badge,
-        },
+        "status": status,
+        "user_id": str(row["user_id"]),
+        "message": str(row["decision_message"] or default_messages.get(status, "حالة الطلب غير معروفة")),
+    }
+
+
+@app.get("/admin/registration-requests")
+async def list_registration_requests(
+    authorization: str | None = Header(default=None),
+):
+    admin_id = authenticated_user(authorization)
+    if admin_id != CN_CALL_DEVELOPER_ID:
+        raise HTTPException(status_code=403, detail="هذه العملية متاحة لإدارة CN CALL فقط")
+
+    db = get_db()
+    try:
+        rows = db.execute(
+            """
+            SELECT request_id, user_id, username, requested_at
+            FROM registration_requests
+            WHERE status = 'pending'
+            ORDER BY requested_at ASC
+            LIMIT 100
+            """
+        ).fetchall()
+        requests = [_registration_request_to_dict(row) for row in rows]
+        return {"success": True, "requests": requests, "count": len(requests)}
+    finally:
+        db.close()
+
+
+@app.post("/admin/registration-requests/{request_id}/decision")
+async def decide_registration_request(
+    request_id: str,
+    request: RegistrationDecisionRequest,
+    authorization: str | None = Header(default=None),
+):
+    admin_id = authenticated_user(authorization)
+    if admin_id != CN_CALL_DEVELOPER_ID:
+        raise HTTPException(status_code=403, detail="هذه العملية متاحة لإدارة CN CALL فقط")
+
+    db = get_db()
+    now = int(time.time() * 1000)
+    try:
+        # Atomically claim the request so two sessions cannot decide it twice.
+        claimed = db.execute(
+            """
+            UPDATE registration_requests
+            SET status = 'processing'
+            WHERE request_id = ? AND status = 'pending'
+            """,
+            (request_id.strip(),),
+        )
+        if claimed.rowcount != 1:
+            db.rollback()
+            return {"success": False, "message": "تمت مراجعة هذا الطلب مسبقًا أو أنه غير موجود"}
+
+        row = db.execute(
+            """
+            SELECT request_id, user_id, username, password_hash, password_salt
+            FROM registration_requests
+            WHERE request_id = ?
+            """,
+            (request_id.strip(),),
+        ).fetchone()
+        if row is None:
+            db.rollback()
+            return {"success": False, "message": "طلب التسجيل غير موجود"}
+
+        user_id = str(row["user_id"])
+        username = str(row["username"])
+        if request.approve:
+            if user_id == CN_CALL_DEVELOPER_ID:
+                db.rollback()
+                return {"success": False, "message": "لا يمكن تخصيص رقم الإدارة"}
+            inserted = db.execute(
+                """
+                INSERT INTO users (user_id, username, password_hash, password_salt)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO NOTHING
+                """,
+                (
+                    user_id,
+                    username,
+                    str(row["password_hash"]),
+                    str(row["password_salt"]),
+                ),
+            )
+            if inserted.rowcount != 1:
+                db.execute(
+                    """
+                    UPDATE registration_requests
+                    SET status = 'rejected', reviewed_at = ?, reviewed_by = ?,
+                        decision_message = ?, password_hash = '', password_salt = ''
+                    WHERE request_id = ?
+                    """,
+                    (now, admin_id, "لا يمكن قبول الطلب؛ الرقم مرتبط بحساب موجود", request_id),
+                )
+                db.commit()
+                return {
+                    "success": False,
+                    "message": "تعذر القبول؛ الرقم مرتبط بحساب موجود وتم إغلاق الطلب",
+                }
+
+            db.execute(
+                """
+                UPDATE registration_requests
+                SET status = 'approved', reviewed_at = ?, reviewed_by = ?,
+                    decision_message = ?, password_hash = '', password_salt = ''
+                WHERE request_id = ?
+                """,
+                (now, admin_id, "تم قبول طلبك. يمكنك الآن تسجيل الدخول", request_id),
+            )
+            db.commit()
+            print(
+                "[CN CALL][REGISTRATION APPROVED]",
+                "request_id=", request_id,
+                "user_id=", user_id,
+                "reviewer=", admin_id,
+            )
+            return {
+                "success": True,
+                "message": f"تم قبول الرقم {user_id} وإنشاء الحساب",
+                "status": "approved",
+            }
+
+        db.execute(
+            """
+            UPDATE registration_requests
+            SET status = 'rejected', reviewed_at = ?, reviewed_by = ?,
+                decision_message = ?, password_hash = '', password_salt = ''
+            WHERE request_id = ?
+            """,
+            (now, admin_id, "تم رفض طلب استخدام هذا الرقم من الإدارة", request_id),
+        )
+        db.commit()
+        print(
+            "[CN CALL][REGISTRATION REJECTED]",
+            "request_id=", request_id,
+            "user_id=", user_id,
+            "reviewer=", admin_id,
+        )
+        return {
+            "success": True,
+            "message": f"تم رفض طلب الرقم {user_id}",
+            "status": "rejected",
+        }
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@app.post("/register")
+async def register_legacy_disabled(request: RegisterRequest):
+    # Older clients sent arbitrary IDs directly to this endpoint. Keep the
+    # route for a clear compatibility response, but never create an account
+    # through it; all new registrations must use one of the guarded flows.
+    return {
+        "success": False,
+        "message": "حدّث التطبيق لاستخدام التسجيل الآمن برقم فريد أو طلب موافقة للرقم الحقيقي",
     }
 
 
