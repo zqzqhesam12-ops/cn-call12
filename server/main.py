@@ -15,6 +15,7 @@ import sqlite3
 import time
 import psycopg
 from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 import shutil
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -50,6 +51,37 @@ async def migration_maintenance_middleware(request, call_next):
 
 BASE_DIR = Path(__file__).resolve().parent
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+DATABASE_POOL: ConnectionPool | None = None
+
+
+def _get_database_pool() -> ConnectionPool:
+    """Return the bounded PostgreSQL pool, recreating it after app shutdown."""
+    global DATABASE_POOL
+
+    if not DATABASE_URL:
+        raise RuntimeError("PostgreSQL pool requested without DATABASE_URL")
+
+    if DATABASE_POOL is None or DATABASE_POOL.closed:
+        DATABASE_POOL = ConnectionPool(
+            conninfo=DATABASE_URL,
+            kwargs={
+                "row_factory": dict_row,
+                "connect_timeout": 5,
+            },
+            min_size=1,
+            max_size=4,
+            max_waiting=20,
+            timeout=5.0,
+            open=False,
+            name="cn-call-postgres",
+        )
+        # Avoid holding up module import while the pool establishes its first
+        # connection. The first checkout waits only up to the configured limit.
+        DATABASE_POOL.open(wait=False)
+
+    return DATABASE_POOL
+
+
 CN_CALL_MIGRATION_MODE = os.getenv("CN_CALL_MIGRATION_MODE", "").strip().lower() in {"1", "true", "yes"}
 VOLUME_DIR = Path("/app/data")
 DB_PATH = VOLUME_DIR / "cn_call.db"
@@ -1203,6 +1235,9 @@ async def stop_call_expiry_loop():
         fcm_token_cleanup_task.cancel()
         fcm_token_cleanup_task = None
 
+    if DATABASE_POOL is not None and not DATABASE_POOL.closed:
+        DATABASE_POOL.close()
+
 FCM_TOKENS: dict[str, str] = {}
 
 firebase_key = BASE_DIR / "secrets" / "firebase-service-account.json"
@@ -1225,17 +1260,23 @@ if not firebase_admin._apps:
 # ============================================================
 
 class DatabaseHandle:
-    """Small compatibility wrapper for PostgreSQL and temporary SQLite fallback."""
+    """Small compatibility wrapper for PostgreSQL pool and SQLite fallback."""
 
     def __init__(self):
         self.is_postgres = bool(DATABASE_URL)
+        self._pool: ConnectionPool | None = None
+        self._returned = False
 
         if self.is_postgres:
-            self._db = psycopg.connect(
-                DATABASE_URL,
-                row_factory=dict_row,
-                connect_timeout=10,
-            )
+            self._pool = _get_database_pool()
+            started = time.perf_counter()
+            self._db = self._pool.getconn(timeout=5.0)
+            wait_ms = (time.perf_counter() - started) * 1000
+            if wait_ms >= 250:
+                print(
+                    "[CN CALL][DB POOL WAIT]",
+                    "elapsed_ms=", round(wait_ms, 1),
+                )
         else:
             self._db = sqlite3.connect(DB_PATH)
             self._db.row_factory = sqlite3.Row
@@ -1262,15 +1303,37 @@ class DatabaseHandle:
                 ).rstrip()
                 sql += "\nON CONFLICT DO NOTHING"
 
-        return self._db.execute(sql, params or ())
+        started = time.perf_counter()
+        cursor = self._db.execute(sql, params or ())
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        if elapsed_ms >= 500:
+            command = sql.lstrip().split(None, 1)[0].upper() if sql.strip() else "UNKNOWN"
+            print(
+                "[CN CALL][DB SLOW QUERY]",
+                "operation=", command,
+                "elapsed_ms=", round(elapsed_ms, 1),
+            )
+        return cursor
 
     def commit(self):
+        started = time.perf_counter()
         self._db.commit()
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        if elapsed_ms >= 500:
+            print(
+                "[CN CALL][DB SLOW COMMIT]",
+                "elapsed_ms=", round(elapsed_ms, 1),
+            )
 
     def rollback(self):
         self._db.rollback()
 
     def close(self):
+        if self.is_postgres:
+            if not self._returned and self._pool is not None:
+                self._pool.putconn(self._db)
+                self._returned = True
+            return
         self._db.close()
 
 
