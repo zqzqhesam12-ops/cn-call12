@@ -22,6 +22,7 @@ const MethodChannel _telecomEventsChannel =
 enum CnSetupState { unconfigured, checking, ready }
 
 const _cnSetupPrefKey = 'cn_call_setup_complete_v1';
+const String _cnCallDeveloperPhone = '780331040';
 
 void _installTelecomEventHandler() {
   _telecomEventsChannel.setMethodCallHandler((call) async {
@@ -1163,7 +1164,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
       _useRealPhone = true;
       userIdController.text = prefs.getString(_pendingPhoneKey) ?? '';
       usernameController.text = prefs.getString(_pendingNameKey) ?? '';
-      _statusBanner = 'لديك طلب رقم حقيقي قيد المتابعة. سنعرض قرار الإدارة هنا.';
+      _statusBanner = 'طلبك قيد المراجعة. أكّد رقمك من خلال الرقم أدناه.';
     });
     _startRequestPolling();
   }
@@ -1265,7 +1266,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
         _submitting = false;
         _pendingRequestId = requestId;
         _pendingRequestToken = requestToken;
-        _statusBanner = 'تم إرسال طلب الرقم $userId إلى الإدارة. انتظر القبول أو الرفض داخل التطبيق.';
+        _statusBanner = 'تم إرسال طلبك. أكّد رقمك بالاتصال أو الرسالة أدناه، ثم انتظر الموافقة.';
       });
       _startRequestPolling();
       return;
@@ -1315,7 +1316,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
         if (_statusBanner == null ||
             !_statusBanner!.contains('قيد المراجعة')) {
           setState(() {
-            _statusBanner = 'طلبك قيد المراجعة من إدارة CN CALL. لا حاجة لإعادة التسجيل.';
+            _statusBanner = 'طلبك قيد المراجعة. انتظر موافقة الإدارة داخل التطبيق.';
           });
         }
         return;
@@ -1578,6 +1579,47 @@ class _RegisterScreenState extends State<RegisterScreen> {
                             const Icon(Icons.info_outline, color: Color(0xFF00E676)),
                             const SizedBox(width: 10),
                             Expanded(child: Text(_statusBanner!, style: const TextStyle(height: 1.4))),
+                          ],
+                        ),
+                      ),
+                    ],
+                    if (pending && !_approvalGranted) ...[
+                      const SizedBox(height: 12),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF00E676).withValues(alpha: .08),
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                            color: const Color(0xFF00E676).withValues(alpha: .35),
+                          ),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            const Text(
+                              'تأكيد رقم الهاتف',
+                              style: TextStyle(
+                                color: Color(0xFF00E676),
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            const Text(
+                              'اتصل أو أرسل رسالة إلى الرقم التالي من رقم الهاتف الذي سجّلته، ثم انتظر موافقة الإدارة.',
+                              style: TextStyle(height: 1.4),
+                            ),
+                            const SizedBox(height: 10),
+                            SelectableText(
+                              _cnCallDeveloperPhone,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                fontSize: 24,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 1.5,
+                              ),
+                            ),
                           ],
                         ),
                       ),
