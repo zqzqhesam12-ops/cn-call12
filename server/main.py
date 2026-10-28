@@ -2236,13 +2236,14 @@ async def request_phone_registration(request: PhoneRegistrationRequest):
         ).hexdigest()
         now = int(time.time() * 1000)
 
-        db.execute(
+        inserted = db.execute(
             """
             INSERT INTO registration_requests (
                 request_id, user_id, username, password_hash, password_salt,
                 request_token_hash, status, requested_at
             )
             VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+            ON CONFLICT DO NOTHING
             """,
             (
                 request_id,
@@ -2254,6 +2255,12 @@ async def request_phone_registration(request: PhoneRegistrationRequest):
                 now,
             ),
         )
+        if inserted.rowcount != 1:
+            db.rollback()
+            return {
+                "success": False,
+                "message": "يوجد طلب قيد المراجعة لهذا الرقم بالفعل",
+            }
         db.commit()
         print(
             "[CN CALL][REGISTRATION REQUEST]",
